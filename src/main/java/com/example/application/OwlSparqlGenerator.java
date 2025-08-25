@@ -1,150 +1,162 @@
+// com/example/application/OwlSparqlGenerator.java
 package com.example.application;
 
-import com.example.ontology.OntologyService;
-import com.example.query.QueryGenerationService;
-import com.example.reasoning.ReasoningService;
-import com.example.explanation.ExplanationService;
-import com.example.output.OutputService;
-import com.example.output.HybridOutputService;
-import com.example.tracking.GlobalQueryTracker; // ADD THIS IMPORT
-import org.semanticweb.owlapi.model.AxiomType;
-import org.semanticweb.owlapi.model.OWLOntology;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.example.config.ProcessingConfiguration;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.stereotype.Component;
+import com.example.processing.SmallOntologiesProcessor;
+import com.example.processing.ProcessingResult;
+import com.example.ontology.DefaultOntologyService;
+import com.example.reasoning.PelletReasoningService;
+import com.example.query.SparqlQueryGenerationService;
+import com.example.output.StreamingOutputService;
+
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import javax.annotation.PostConstruct; // ADD THIS IMPORT
-import java.nio.file.DirectoryStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.HashSet;
-import java.util.Set;
+import jakarta.annotation.PreDestroy;
 
+/**
+ * Professional OWL Inference Processor
+ * Processes multiple small ontologies to generate comprehensive explanations and queries
+ */
 @SpringBootApplication(scanBasePackages = "com.example")
+@EnableConfigurationProperties(ProcessingConfiguration.class)
 public class OwlSparqlGenerator implements CommandLineRunner {
+
     private static final Logger LOGGER = LoggerFactory.getLogger(OwlSparqlGenerator.class);
 
     @Autowired
-    private OntologyService ontologyService;
-    @Autowired
-    private ReasoningService reasoningService;
-    @Autowired
-    private ExplanationService explanationService;
-    @Autowired
-    private QueryGenerationService queryService;
-    @Autowired
-    private OutputService outputService;
+    @Qualifier("processingConfiguration")
+    private ProcessingConfiguration config;
 
-    @Value("${output.csv.path:SPARQL_questions.csv}")
-    private String csvOutputPath;
-
-    @Value("${output.json.path:explanations.json}")
-    private String jsonOutputPath;
+    private SmallOntologiesProcessor processor;
 
     public static void main(String[] args) {
+        configureJVM();
         SpringApplication.run(OwlSparqlGenerator.class, args);
     }
 
-    // ADD THIS METHOD
-    @PostConstruct
-    public void initialize() {
-        // Reset global tracker at the start of processing all ontologies
-        GlobalQueryTracker.reset();
-        LOGGER.info("Application initialized - Global query tracker reset");
+    private static void configureJVM() {
+        // Enhanced JVM configuration for large ontology processing
+        System.setProperty("java.util.concurrent.ForkJoinPool.common.parallelism", "1");
+        System.setProperty("java.awt.headless", "true");
+
+        // Reduce logging overhead for better performance
+        System.setProperty("logging.level.openllet", "WARN");
+        System.setProperty("logging.level.org.semanticweb.owlapi", "WARN");
+
+        // Memory optimization settings
+        System.setProperty("java.util.concurrent.ThreadPoolExecutor.allowCoreThreadTimeOut", "true");
+
+        LOGGER.info("JVM configured for sequential large ontology processing");
     }
 
     @Override
     public void run(String... args) throws Exception {
-        String ontologiesDir = args.length > 0
-                ? args[0]
-                : "src/main/resources/ontologies/family_1hop_tbox";
-        Path dir = Path.of(ontologiesDir);
-        if (!Files.isDirectory(dir)) {
-            throw new IllegalArgumentException("Not a directory: " + ontologiesDir);
+        // Add memory monitoring
+        logInitialMemoryStatus();
+
+        // Override config from command line args if provided
+        if (args.length > 0) {
+            config.setOntologiesDirectory(args[0]);
+        }
+        if (args.length > 1) {
+            config.setOutputDirectory(args[1]);
         }
 
-        LOGGER.info("Initializing output service");
-        outputService.initialize();
+        LOGGER.info("=== Professional OWL Inference Processor (Sequential Mode) ===");
+        logSystemInfo();
 
-        int processedCount = 0; // ADD COUNTER
+        // Initialize services
+        DefaultOntologyService ontologyService = new DefaultOntologyService();
+        PelletReasoningService reasoningService = new PelletReasoningService();
+        SparqlQueryGenerationService queryService = new SparqlQueryGenerationService();
+        StreamingOutputService outputService = new StreamingOutputService(config.getOutputDirectory());
 
-        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir, "*.ttl")) {
-            for (Path file : stream) {
-                String filename = file.getFileName().toString();
-                String rootEntity = filename.substring(0, filename.lastIndexOf('.'));
+        // Create main processor (using the same class name)
+        processor = new SmallOntologiesProcessor(
+                ontologyService, reasoningService, queryService, outputService, config);
 
-                ((HybridOutputService) outputService).setCurrentRootEntity(rootEntity);
+        try {
+            LOGGER.info("Starting SEQUENTIAL processing of ontologies...");
+            ProcessingResult result = processor.processSmallOntologies(config.getOntologiesDirectory());
+            logResults(result);
 
-                LOGGER.info("Loading ontology: {}", filename);
-                ontologyService.loadOntology(file.toString());
+        } catch (Exception e) {
+            LOGGER.error("Processing failed", e);
+            throw e;
+        }
+    }
 
-                OWLOntology ontology = ontologyService.getOntology();
-                int tboxSize = countTBoxAxioms(ontology);
-                int aboxSize = countABoxAxioms(ontology);
-                LOGGER.info("Ontology sizes - TBox: {}, ABox: {}", tboxSize, aboxSize);
+    private void logInitialMemoryStatus() {
+        Runtime runtime = Runtime.getRuntime();
+        LOGGER.info("Initial Memory Status:");
+        LOGGER.info("  Max memory: {:.2f} GB", runtime.maxMemory() / (1024.0 * 1024.0 * 1024.0));
+        LOGGER.info("  Total memory: {:.2f} GB", runtime.totalMemory() / (1024.0 * 1024.0 * 1024.0));
+        LOGGER.info("  Free memory: {:.2f} GB", runtime.freeMemory() / (1024.0 * 1024.0 * 1024.0));
+    }
 
-                ((HybridOutputService) outputService).setOntologySizes(tboxSize, aboxSize);
+    private void logSystemInfo() {
+        Runtime runtime = Runtime.getRuntime();
+        LOGGER.info("System Configuration:");
+        LOGGER.info("  Available processors: {}", runtime.availableProcessors());
+        LOGGER.info("  Max memory: {:.2f} GB", runtime.maxMemory() / (1024.0 * 1024.0 * 1024.0));
+        LOGGER.info("  Ontologies directory: {}", config.getOntologiesDirectory());
+        LOGGER.info("  Output directory: {}", config.getOutputDirectory());
+        LOGGER.info("  Max explanations per inference: {}", config.getMaxExplanationsPerInference());
+        LOGGER.info("  Thread pool size: {}", config.getThreadPoolSize());
+        LOGGER.info("  Processing timeout: {} hours", config.getTimeoutHours());
+    }
 
-                LOGGER.info("Initializing reasoner for {}", filename);
-                reasoningService.initializeReasoner(ontology);
-                if (!reasoningService.isConsistent()) {
-                    LOGGER.warn("Ontology {} is inconsistent", filename);
-                    reasoningService.reportUnsatisfiableClasses();
-                }
+    private void logResults(ProcessingResult result) {
+        LOGGER.info("=== PROCESSING COMPLETED ===");
+        LOGGER.info("Results Summary:");
+        LOGGER.info("  Total inferences processed: {}", result.getTotalInferences());
+        LOGGER.info("  Total explanation paths: {}", result.getProcessedExplanations());
+        LOGGER.info("  Generated queries: {}", result.getProcessedQueries());
+        LOGGER.info("  Binary queries: {}", result.getBinaryQueries());
+        LOGGER.info("  Multi-choice queries: {}", result.getMultiChoiceQueries());
+        LOGGER.info("  Processing time: {:.2f} minutes", result.getProcessingTimeMs() / 60000.0);
+        LOGGER.info("  Memory used: {:.2f} MB", result.getMemoryUsedMB());
+        LOGGER.info("  Success: {}", result.isSuccess());
 
-                LOGGER.info("Initializing explanation service");
-                explanationService.initializeExplanations(reasoningService.getReasoner());
+        if (result.hasErrors()) {
+            LOGGER.warn("Errors encountered ({}): ", result.getErrorCount());
+            result.getErrors().forEach(error -> LOGGER.warn("  - {}", error));
+        }
 
-                LOGGER.info("Initializing query service");
-                queryService.initialize(
-                        ontology,
-                        reasoningService.getReasoner(),
-                        explanationService,
-                        ontologyService.getDataFactory()
-                );
+        if (result.hasWarnings()) {
+            LOGGER.info("Warnings ({}): ", result.getWarningCount());
+            result.getWarnings().forEach(warning -> LOGGER.debug("  - {}", warning));
+        }
 
-                LOGGER.info("Generating queries for {}", filename);
-                queryService.generatePropertyAssertionQueries(outputService);
-                queryService.generateMembershipQueries(outputService);
-                queryService.generateSubsumptionQueries(outputService);
+        // Performance insights
+        if (result.getTotalInferences() > 0) {
+            double avgTimePerInference = (double) result.getProcessingTimeMs() / result.getTotalInferences();
+            LOGGER.info("  Average time per inference: {:.2f} ms", avgTimePerInference);
+        }
+    }
 
-                processedCount++; // INCREMENT COUNTER
-
-                // ADD PROGRESS LOGGING
-                if (processedCount % 50 == 0) {
-                    GlobalQueryTracker.logStats();
-                    GlobalQueryTracker.logMemoryUsage();
-                }
+    @PreDestroy
+    public void cleanup() {
+        try {
+            if (processor != null) {
+                LOGGER.info("Shutting down processor...");
+                processor.close();
+                LOGGER.info("Processor shut down successfully");
             }
+        } catch (Exception e) {
+            LOGGER.warn("Error during cleanup: {}", e.getMessage());
+        } finally {
+            // Suggest garbage collection
+            System.gc();
         }
-
-        LOGGER.info("Closing output service");
-        outputService.close();
-
-        // ADD FINAL STATS
-        LOGGER.info("Processing complete! Processed {} ontologies", processedCount);
-        GlobalQueryTracker.logStats();
-
-        LOGGER.info("Done. CSV: {}, JSON: {}", csvOutputPath, jsonOutputPath);
-    }
-
-    private int countTBoxAxioms(OWLOntology ontology) {
-        Set<AxiomType<?>> tboxAxiomTypes = new HashSet<>();
-        tboxAxiomTypes.addAll(AxiomType.TBoxAxiomTypes);
-        return (int) ontology.axioms()
-                .filter(ax -> tboxAxiomTypes.contains(ax.getAxiomType()))
-                .count();
-    }
-
-    private int countABoxAxioms(OWLOntology ontology) {
-        Set<AxiomType<?>> aboxAxiomTypes = new HashSet<>();
-        aboxAxiomTypes.addAll(AxiomType.ABoxAxiomTypes);
-        return (int) ontology.axioms()
-                .filter(ax -> aboxAxiomTypes.contains(ax.getAxiomType()))
-                .count();
     }
 }

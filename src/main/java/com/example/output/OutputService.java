@@ -1,58 +1,25 @@
+// com/example/output/OutputService.java
 package com.example.output;
 
 import java.io.IOException;
 import java.util.List;
-import java.util.Map;
 
-/**
- * Interface for services that output query data.
- */
-public interface OutputService extends AutoCloseable {
-    /**
-     * Initialize the output service.
-     */
+public interface OutputService {
     void initialize() throws IOException;
 
-    /**
-     * Write a binary (yes/no) query to the output.
-     */
-    void writeBinaryQuery(String taskType,
-                          String sparql,
-                          String predicate,
-                          String answer,
-                          String explanation,
-                          int size) throws IOException;
+    void writeQueryWithTags(String taskId, String query, String taskType, String answer, String explanation, String tags);
 
-    /**
-     * Write a multiple choice query to the output.
-     */
-    void writeMultiChoiceQuery(String taskType,
-                               String sparql,
-                               String predicate,
-                               String answer,
-                               String explanation,
-                               int size) throws IOException;
+    void writeComprehensiveQuery(String taskId, String rootEntity, int tboxSize, int aboxSize,
+                                 String taskType, String answerType, String sparqlQuery,
+                                 String predicate, String answer, List<String> allAnswers,
+                                 int minTagLength, int maxTagLength);
 
-    /**
-     * Write a multiple choice query with grouped answers to the output.
-     * Default implementation falls back to writing individual answers.
-     */
-    default void writeGroupedMultiChoiceQuery(String taskType,
-                                              String sparql,
-                                              String predicate,
-                                              List<String> answers,
-                                              Map<String, String> explanationMap,
-                                              Map<String, Integer> sizeMap) throws IOException {
-        // Default implementation falls back to writing multiple individual entries
-        for (String answer : answers) {
-            writeMultiChoiceQuery(
-                    taskType,
-                    sparql,
-                    predicate,
-                    answer,
-                    explanationMap.get(answer),
-                    sizeMap.getOrDefault(answer, 1)
-            );
-        }
-    }
+    void writeExplanationWithTags(String key, String explanation, String tags);
+
+    void writeExplanationWithComprehensiveFormat(String key, String comprehensiveExplanation);
+
+    void setTotalQueries(long total);
+    void logProgress(String operation, long completed, long total);
+    void flush();
+    void close() throws IOException;
 }

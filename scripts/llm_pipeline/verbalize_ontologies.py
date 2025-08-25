@@ -1,10 +1,3 @@
-"""
-verbalize_ontologies.py
----------------------
-Verbalize all ontologies in the family_1hop_tbox directory.
-Converts TTL ontology files to natural language descriptions and saves as JSON.
-Runnable from IDE without terminal.
-"""
 # Import necessary libraries
 import rdflib
 from rdflib import Graph, URIRef, Literal, BNode
@@ -13,471 +6,1127 @@ from pathlib import Path
 import os
 import re
 import json
-import glob
 import inflect
+import gc
+import psutil
+import time
+from pathlib import Path
+
+# SimpleNLG imports (optional)
+try:
+    from simplenlg.framework import NLGFactory, CoordinatedPhraseElement
+    from simplenlg.lexicon import Lexicon
+    from simplenlg.realiser.english import Realiser
+    from simplenlg.phrasespec import SPhraseSpec
+    from simplenlg.features import Feature, Tense, NumberAgreement
+    SIMPLENLG_AVAILABLE = True
+    print("âœ… SimpleNLG available")
+except ImportError:
+    print("âš ï¸ SimpleNLG not available. Using basic text generation.")
+    SIMPLENLG_AVAILABLE = False
+
+# Navigate to project root
+try:
+    script_dir = Path(__file__).resolve().parent
+    project_root = script_dir.parent.parent
+    os.chdir(project_root)
+except NameError:
+    print("Could not dynamically set project root. Assuming current working directory is correct.")
+    pass
+
+print(f"Working directory set to: {os.getcwd()}")
+
+# Initialize SimpleNLG if available
+if SIMPLENLG_AVAILABLE:
+    lexicon = Lexicon.getDefaultLexicon()
+    nlg_factory = NLGFactory(lexicon)
+    realiser = Realiser(lexicon)
+    print("âœ… SimpleNLG initialized")
+
 p = inflect.engine()
 
-def get_nice_label(g, entity):
-    """Get a nice label for an entity."""
-    # First check if there's a literal label
-    label = g.value(entity, RDFS.label)
-    if label:
-        return str(label)
+class DomainIndependentVerbalizer:
+    """Core verbalizer that works with any domain by using structural patterns only"""
 
-    # If no label, use the entity name/IRI
+    def __init__(self):
+        # Pure linguistic patterns based on property structure only
+        self.structural_patterns = {
+            'has_prefix': self._has_pattern,
+            'is_of_suffix': self._is_of_pattern,
+            'inverse_property': self._inverse_pattern,
+            'symmetric_property': self._symmetric_pattern,
+            'transitive_property': self._transitive_pattern,
+            'functional_property': self._functional_pattern,
+            'default': self._default_pattern
+        }
+
+    def detect_linguistic_pattern(self, property_name, property_characteristics):
+        """Detect pattern based purely on linguistic structure, not semantics"""
+
+        # Check OWL property characteristics first (most reliable)
+        if 'functional' in property_characteristics:
+            return 'functional_property'
+        if 'symmetric' in property_characteristics:
+            return 'symmetric_property'
+        if 'transitive' in property_characteristics:
+            return 'transitive_property'
+
+        # Then check pure linguistic patterns
+        clean_name = self._clean_property_name(property_name)
+
+        if clean_name.startswith('has'):
+            return 'has_prefix'
+        elif clean_name.startswith('is') and clean_name.endswith('of'):
+            return 'is_of_suffix'
+        else:
+            return 'default'
+
+    def _clean_property_name(self, prop_name):
+        """Clean property name to basic linguistic components"""
+        # Remove namespace prefixes
+        if '#' in prop_name:
+            prop_name = prop_name.split('#')[-1]
+        elif '/' in prop_name:
+            prop_name = prop_name.split('/')[-1]
+
+        # Convert camelCase to space-separated
+        spaced = re.sub(r'([a-z])([A-Z])', r'\1 \2', prop_name)
+
+        # Clean up the result
+        cleaned = spaced.lower().strip()
+
+        # Fix common issues
+        cleaned = re.sub(r'\s+', ' ', cleaned)  # Remove extra spaces
+
+        return cleaned
+
+    def _has_pattern(self, subject, prop_name, obj):
+        """Pattern: hasX -> 'subject has X object'"""
+        clean_prop = self._clean_property_name(prop_name)
+
+        # More careful removal of 'has' - only from the beginning
+        relation = clean_prop
+        if relation.startswith('has '):
+            relation = relation[4:]  # Remove 'has '
+        elif relation.startswith('has'):
+            relation = relation[3:]  # Remove 'has'
+
+        relation = relation.strip()
+
+        if relation:
+            return f"{subject} has {relation} {obj}"
+        return f"{subject} has {obj}"
+
+    def _is_of_pattern(self, subject, prop_name, obj):
+        """Pattern: isXOf -> 'subject is X of object'"""
+        clean_prop = self._clean_property_name(prop_name)
+
+        # More careful removal of 'is' and 'of' - only from start/end
+        relation = clean_prop
+
+        # Remove 'is' only from the beginning
+        if relation.startswith('is '):
+            relation = relation[3:]  # Remove 'is '
+        elif relation.startswith('is'):
+            relation = relation[2:]  # Remove 'is'
+
+        # Remove 'of' only from the end
+        if relation.endswith(' of'):
+            relation = relation[:-3]  # Remove ' of'
+        elif relation.endswith('of'):
+            relation = relation[:-2]  # Remove 'of'
+
+        relation = relation.strip()
+
+        if relation:
+            return f"{subject} is {relation} of {obj}"
+        return f"{subject} is related to {obj}"
+
+    def _inverse_pattern(self, subject, prop_name, obj):
+        """For inverse properties, swap subject/object linguistically"""
+        base_relation = self._extract_base_relation(prop_name)
+        return f"{obj} {base_relation} {subject}"
+
+    def _symmetric_pattern(self, subject, prop_name, obj):
+        """Symmetric properties: both directions implied"""
+        base_relation = self._extract_base_relation(prop_name)
+        return f"{subject} and {obj} are mutually {base_relation}"
+
+    def _transitive_pattern(self, subject, prop_name, obj):
+        """Transitive properties: mention transitivity"""
+        base_relation = self._extract_base_relation(prop_name)
+        return f"{subject} {base_relation} {obj}"
+
+    def _functional_pattern(self, subject, prop_name, obj):
+        """Functional properties: unique relationship"""
+        base_relation = self._extract_base_relation(prop_name)
+        return f"{subject} has exactly one {base_relation} {obj}"
+
+    def _default_pattern(self, subject, prop_name, obj):
+        """Default: use property name as-is with cleaning"""
+        clean_prop = self._clean_property_name(prop_name)
+
+        # Try to make it into a reasonable verb phrase
+        if clean_prop.startswith('has'):
+            # Use the careful has pattern
+            return self._has_pattern(subject, prop_name, obj)
+        elif clean_prop.startswith('is') and clean_prop.endswith('of'):
+            # Use the careful is_of pattern
+            return self._is_of_pattern(subject, prop_name, obj)
+        else:
+            # Use the cleaned property name as a verb phrase
+            return f"{subject} {clean_prop} {obj}"
+
+    def _extract_base_relation(self, prop_name):
+        """Extract the core relation from any property name"""
+        clean = self._clean_property_name(prop_name)
+
+        # Use the same careful approach for extraction
+        relation = clean
+        if relation.startswith('has '):
+            relation = relation[4:]
+        elif relation.startswith('has'):
+            relation = relation[3:]
+        elif relation.startswith('is '):
+            relation = relation[3:]
+        elif relation.startswith('is'):
+            relation = relation[2:]
+
+        if relation.endswith(' of'):
+            relation = relation[:-3]
+        elif relation.endswith('of'):
+            relation = relation[:-2]
+
+        relation = relation.strip()
+        return relation if relation else 'relates to'
+
+def clean_entity_name(name):
+    """Clean entity names to be more human-readable for any domain"""
+    if not name:
+        return ""
+
+    # Remove common technical suffixes
+    name = re.sub(r'_\d{4}$', '', name)  # Remove years like _1885
+    name = re.sub(r'_\d+$', '', name)    # Remove any trailing numbers
+    name = re.sub(r'_v\d+$', '', name)   # Remove version numbers like _v1
+    name = re.sub(r'_\w{2,3}$', '', name) # Remove short suffixes like _en, _us
+
+    # Convert camelCase to Title Case
+    name = re.sub(r'([a-z])([A-Z])', r'\1 \2', name)
+
+    # Replace underscores and hyphens with spaces
+    name = name.replace('_', ' ').replace('-', ' ')
+
+    # Remove common prefixes
+    prefixes_to_remove = ['owl:', 'rdf:', 'rdfs:', 'xsd:', 'foaf:', 'dc:', 'dct:']
+    for prefix in prefixes_to_remove:
+        if name.lower().startswith(prefix):
+            name = name[len(prefix):]
+
+    # Capitalize properly and clean up spaces
+    words = [word.capitalize() for word in name.split() if word]
+    return ' '.join(words)
+
+def get_nice_label(g, entity):
+    """Get a nice label for an entity from any domain"""
+    # Priority order for labels
+    label_properties = [
+        RDFS.label,
+        URIRef("http://www.w3.org/2004/02/skos/core#prefLabel"),
+        URIRef("http://purl.org/dc/elements/1.1/title"),
+        URIRef("http://xmlns.com/foaf/0.1/name"),
+        URIRef("http://schema.org/name")
+    ]
+
+    # Try to find a label using common label properties
+    for label_prop in label_properties:
+        label = g.value(entity, label_prop)
+        if label:
+            return clean_entity_name(str(label))
+
+    # If no label found, extract from URI
     if isinstance(entity, URIRef):
         uri_str = str(entity)
         if '#' in uri_str:
             name = uri_str.split('#')[-1]
-        else:
+        elif '/' in uri_str:
             name = uri_str.split('/')[-1]
+        else:
+            name = uri_str
+        return clean_entity_name(name)
 
-        # Convert camelCase or snake_case to space-separated words
-        words = re.sub(r'([a-z])([A-Z])', r'\1 \2', name)  # Split camelCase
-        words = words.replace('_', ' ')  # Replace underscores with spaces
-
-        return words.capitalize()
-
-    # For blank nodes, return None
     return None
 
-def describe_class(g, cls, classes, subclass_relations, equivalent_class_relations, obj_properties, property_domains, property_ranges):
-    """Generate a detailed natural language description of a class."""
+def create_simple_sentence(subject, verb, object_val, is_plural_subject=False):
+    """Create a grammatically correct sentence using SimpleNLG or fallback"""
+    if not SIMPLENLG_AVAILABLE:
+        return f"{subject} {verb} {object_val}."
+
+    try:
+        # Create sentence
+        sentence = nlg_factory.createClause()
+        sentence.setSubject(subject)
+        sentence.setVerb(verb)
+        if object_val:
+            sentence.setObject(object_val)
+
+        # Set number agreement
+        if is_plural_subject:
+            sentence.setFeature(Feature.NUMBER, NumberAgreement.PLURAL)
+
+        # Realize the sentence
+        output = realiser.realiseSentence(sentence)
+        return output.strip()
+
+    except Exception as e:
+        # Fallback to simple concatenation
+        return f"{subject} {verb} {object_val}."
+
+def create_list_sentence(subject, verb, object_list):
+    """Create a sentence with a coordinated list of objects"""
+    if not SIMPLENLG_AVAILABLE or not object_list:
+        if len(object_list) == 1:
+            return f"{subject} {verb} {object_list[0]}."
+        elif len(object_list) == 2:
+            return f"{subject} {verb} {object_list[0]} and {object_list[1]}."
+        else:
+            return f"{subject} {verb} {', '.join(object_list[:-1])}, and {object_list[-1]}."
+
+    try:
+        # Create coordinated phrase for multiple objects
+        if len(object_list) > 1:
+            coord_phrase = nlg_factory.createCoordinatedPhrase()
+            for obj in object_list:
+                coord_phrase.addCoordinate(obj)
+
+            sentence = nlg_factory.createClause()
+            sentence.setSubject(subject)
+            sentence.setVerb(verb)
+            sentence.setObject(coord_phrase)
+        else:
+            sentence = nlg_factory.createClause()
+            sentence.setSubject(subject)
+            sentence.setVerb(verb)
+            sentence.setObject(object_list[0])
+
+        output = realiser.realiseSentence(sentence)
+        return output.strip()
+
+    except Exception as e:
+        # Fallback
+        if len(object_list) == 1:
+            return f"{subject} {verb} {object_list[0]}."
+        return f"{subject} {verb} {', '.join(object_list[:-1])} and {object_list[-1]}."
+
+def _parse_restriction(g, restriction_node):
+    """Helper function to parse an owl:Restriction and return a human-readable string."""
+    on_prop_uri = g.value(restriction_node, OWL.onProperty)
+    if not on_prop_uri:
+        return None
+
+    prop_name = get_nice_label(g, on_prop_uri)
+    if not prop_name:
+        return None
+
+    # someValuesFrom
+    some_values_from = g.value(restriction_node, OWL.someValuesFrom)
+    if some_values_from:
+        class_name = get_nice_label(g, some_values_from)
+        if class_name:
+            return f"that has some '{prop_name}' relationship with an instance of {class_name}"
+
+    # allValuesFrom
+    all_values_from = g.value(restriction_node, OWL.allValuesFrom)
+    if all_values_from:
+        class_name = get_nice_label(g, all_values_from)
+        if class_name:
+            return f"that only has '{prop_name}' relationships with instances of {class_name}"
+
+    # Cardinality (simplified)
+    cardinality = g.value(restriction_node, OWL.qualifiedCardinality)
+    if cardinality:
+        on_class = g.value(restriction_node, OWL.onClass)
+        class_name = get_nice_label(g, on_class)
+        if class_name:
+            return f"that has exactly {cardinality} '{prop_name}' relationship(s) with an instance of {class_name}"
+
+    return None # Fallback for other restriction types
+
+def describe_class_with_domain_independence(g, cls, classes, subclass_relations, equivalent_class_relations, obj_properties, property_domains, property_ranges):
+    """Generate natural language description of a class without domain assumptions"""
     descriptions = []
     cls_name = get_nice_label(g, cls)
 
-    # Subclass relationships
+    if not cls_name:
+        return ""
+
+    # Subclass relationships (pure structural)
     parents = [o for s, o in subclass_relations if s == cls]
-    for parent in parents:
-        parent_name = get_nice_label(g, parent)
-        descriptions.append(f"{cls_name} is a subclass of {parent_name}.")
+    if parents:
+        parent_names = [get_nice_label(g, parent) for parent in parents if get_nice_label(g, parent)]
+        if parent_names:
+            if len(parent_names) == 1:
+                desc = create_simple_sentence(cls_name, "is a type of", parent_names[0])
+            else:
+                desc = create_list_sentence(cls_name, "is a type of", parent_names)
+            descriptions.append(desc)
 
-    # Equivalent class relationships
+    # --- START MODIFICATION ---
+
+    # Equivalent and Complex Classes (Restrictions)
     equivalents = [o for s, o in equivalent_class_relations if s == cls]
-    for eq in equivalents:
-        if isinstance(eq, URIRef):
-            eq_name = get_nice_label(g, eq)
-            descriptions.append(f"{cls_name} is equivalent to {eq_name}.")
-        else:
-            # For blank nodes, try to interpret the structure
-            union_members = list(g.triples((eq, OWL.unionOf, None)))
-            intersection_members = list(g.triples((eq, OWL.intersectionOf, None)))
+    if equivalents:
+        equiv_names = []
+        for eq in equivalents:
+            if isinstance(eq, URIRef):
+                eq_name = get_nice_label(g, eq)
+                if eq_name:
+                    equiv_names.append(eq_name)
+            elif isinstance(eq, BNode): # This is a complex class definition
+                restriction_desc = _parse_restriction(g, eq)
+                if restriction_desc:
+                    descriptions.append(f"{cls_name} is defined as a class {restriction_desc}.")
 
-            if union_members:
-                union_list = union_members[0][2]
-                members = []
-                while union_list != RDF.nil:
-                    member = g.value(union_list, RDF.first)
-                    if member:
-                        member_name = get_nice_label(g, member)
-                        if member_name:  # Skip blank nodes
-                            members.append(member_name)
-                    union_list = g.value(union_list, RDF.rest)
-
-                if members:
-                    descriptions.append(f"{cls_name} is defined as the union of {', '.join(members)}.")
-
-            elif intersection_members:
-                intersection_list = intersection_members[0][2]
-                members = []
-                while intersection_list != RDF.nil:
-                    member = g.value(intersection_list, RDF.first)
-                    if member:
-                        member_name = get_nice_label(g, member)
-                        if member_name:  # Skip blank nodes
-                            members.append(member_name)
-                    intersection_list = g.value(intersection_list, RDF.rest)
-
-                if members:
-                    descriptions.append(f"{cls_name} is defined as the intersection of {', '.join(members)}.")
-
-    # Properties that have this class as domain
-    domain_props = []
-    for prop in obj_properties:
-        domains = property_domains.get(prop, set())
-        if cls in domains:
-            domain_props.append(prop)
-
-    if domain_props:
-        for prop in domain_props:
-            prop_name = get_nice_label(g, prop)
-            ranges = property_ranges.get(prop, set())
-            range_names = [get_nice_label(g, r) for r in ranges if get_nice_label(g, r)]  # Skip blank nodes
-
-            if range_names:
-                descriptions.append(f"The domain of {prop_name} is {cls_name}, which means that {cls_name} can {prop_name} {', '.join(range_names)}.")
+        if equiv_names:
+            if len(equiv_names) == 1:
+                desc = create_simple_sentence(cls_name, "is equivalent to", equiv_names[0])
             else:
-                descriptions.append(f"The domain of {prop_name} is {cls_name}, which means that {cls_name} can {prop_name} other things.")
+                desc = create_list_sentence(cls_name, "is equivalent to", equiv_names)
+            descriptions.append(desc)
 
-    # Properties that have this class as range
-    range_props = []
-    for prop in obj_properties:
-        ranges = property_ranges.get(prop, set())
-        if cls in ranges:
-            range_props.append(prop)
+    # Disjoint Classes
+    disjoint_classes = []
+    for s, p, o in g.triples((cls, OWL.disjointWith, None)):
+        disjoint_name = get_nice_label(g, o)
+        if disjoint_name:
+            disjoint_classes.append(disjoint_name)
 
-    if range_props:
-        for prop in range_props:
-            prop_name = get_nice_label(g, prop)
-            domains = property_domains.get(prop, set())
-            domain_names = [get_nice_label(g, d) for d in domains if get_nice_label(g, d)]  # Skip blank nodes
+    if disjoint_classes:
+        disjoint_list = " and ".join(disjoint_classes)
+        descriptions.append(f"{cls_name} is disjoint with {disjoint_list}.")
 
-            if domain_names:
-                descriptions.append(f"The range of {prop_name} is {cls_name}, which means that {', '.join(domain_names)} can {prop_name} {cls_name}.")
+    # --- END MODIFICATION ---
+
+    # Domain properties (structural description only)
+    domain_props = [prop for prop in obj_properties if cls in property_domains.get(prop, set())]
+    if domain_props and len(domain_props) <= 3:
+        prop_names = [get_nice_label(g, prop) for prop in domain_props if get_nice_label(g, prop)]
+        if prop_names:
+            if len(prop_names) == 1:
+                desc = f"Instances of {cls_name} can have {prop_names[0]} relationships."
             else:
-                descriptions.append(f"The range of {prop_name} is {cls_name}, which means that other things can {prop_name} {cls_name}.")
+                prop_text = ", ".join(prop_names[:-1]) + f" and {prop_names[-1]}"
+                desc = f"Instances of {cls_name} can have {prop_text} relationships."
+            descriptions.append(desc)
 
-    # Add a final statement about the class type
-    descriptions.append(f"{cls_name} is defined as a class in this ontology.")
+    if not descriptions:
+        desc = create_simple_sentence(cls_name, "is", "a class in this ontology")
+        descriptions.append(desc)
 
     return " ".join(descriptions)
 
-def describe_property(g, prop, obj_properties, property_domains, property_ranges):
-    """Generate a detailed natural language description of a property."""
+def parse_rdf_list(g, node, visited=None):
+    """Recursively parses an RDF list (collection) and returns a Python list of its items."""
+    if visited is None:
+        visited = set()
+    if node in visited: # Avoid recursion loops
+        return []
+    visited.add(node)
+
+    items = []
+    current = node
+    while current and current != RDF.nil:
+        first = g.value(current, RDF.first)
+        if first:
+            items.append(first)
+        current = g.value(current, RDF.rest)
+    return items
+
+def describe_property_with_domain_independence(g, prop, obj_properties, property_domains, property_ranges):
+    """Generate natural language description of a property without domain assumptions"""
     descriptions = []
     prop_name = get_nice_label(g, prop)
 
-    # Check if it's functional, symmetric, transitive, etc.
-    is_functional = False
-    is_symmetric = False
-    is_transitive = False
-    is_inverse_functional = False
+    if not prop_name:
+        return ""
 
+    # Basic description
+    desc = f"{prop_name} is a relationship property."
+    descriptions.append(desc)
+
+    # --- ADD SUBPROPERTY HANDLING HERE ---
+
+    # SubPropertyOf relationships
+    super_properties = []
+    for s, p, o in g.triples((prop, RDFS.subPropertyOf, None)):
+        super_prop_name = get_nice_label(g, o)
+        if super_prop_name:
+            super_properties.append(super_prop_name)
+
+    if super_properties:
+        if len(super_properties) == 1:
+            descriptions.append(f"This property is a subproperty of {super_properties[0]}.")
+        else:
+            super_list = " and ".join(super_properties)
+            descriptions.append(f"This property is a subproperty of {super_list}.")
+
+    # Sub-properties (properties that are subproperties of this one)
+    sub_properties = []
+    for s, p, o in g.triples((None, RDFS.subPropertyOf, prop)):
+        sub_prop_name = get_nice_label(g, s)
+        if sub_prop_name:
+            sub_properties.append(sub_prop_name)
+
+    if sub_properties:
+        if len(sub_properties) == 1:
+            descriptions.append(f"{sub_properties[0]} is a subproperty of this property.")
+        else:
+            sub_list = ", ".join(sub_properties[:-1]) + f" and {sub_properties[-1]}"
+            descriptions.append(f"{sub_list} are subproperties of this property.")
+
+    # --- END SUBPROPERTY HANDLING ---
+
+    # Check property characteristics (formal OWL properties)
+    characteristics = []
     for s, p, o in g.triples((prop, RDF.type, None)):
-        if o == OWL.FunctionalProperty:
-            is_functional = True
-        elif o == OWL.SymmetricProperty:
-            is_symmetric = True
+        if o == OWL.SymmetricProperty:
+            characteristics.append("symmetric")
         elif o == OWL.TransitiveProperty:
-            is_transitive = True
+            characteristics.append("transitive")
+        elif o == OWL.FunctionalProperty:
+            characteristics.append("functional")
         elif o == OWL.InverseFunctionalProperty:
-            is_inverse_functional = True
+            characteristics.append("inverse functional")
+        elif o == OWL.AsymmetricProperty:
+            characteristics.append("asymmetric")
+        elif o == OWL.IrreflexiveProperty:
+            characteristics.append("irreflexive")
 
-    # Describe basic property type
-    descriptions.append(f"{prop_name} is an object property.")
+    # Property Chain Axiom
+    for s, p, o in g.triples((prop, OWL.propertyChainAxiom, None)):
+        # The object 'o' is the head of an RDF list
+        chain_list = parse_rdf_list(g, o)
+        chain_names = [get_nice_label(g, item) for item in chain_list if get_nice_label(g, item)]
 
-    # Add special characteristics
-    if is_functional:
-        descriptions.append(f"It is a functional property, meaning each subject can have at most one {prop_name} relationship.")
+        if len(chain_names) > 1:
+            chain_text = " followed by ".join(chain_names)
+            descriptions.append(f"This property can be inferred from the chain of relationships: {chain_text}.")
 
-    if is_symmetric:
-        descriptions.append(f"It is a symmetric property, meaning if A {prop_name} B, then B {prop_name} A.")
 
-    if is_transitive:
-        descriptions.append(f"It is a transitive property, meaning if A {prop_name} B and B {prop_name} C, then A {prop_name} C.")
+    # Add characteristics descriptions from the list
+    if "functional" in characteristics:
+        descriptions.append("This property is functional (each entity can have at most one value).")
+    if "inverse functional" in characteristics:
+        descriptions.append("This property is inverse functional (each value can be related to at most one entity).")
+    if "symmetric" in characteristics:
+        descriptions.append("This property is symmetric (if A relates to B, then B relates to A).")
+    if "asymmetric" in characteristics:
+        descriptions.append("This property is asymmetric (if A relates to B, then B cannot relate to A).")
+    if "transitive" in characteristics:
+        descriptions.append("This property is transitive (it can form chains of relationships).")
+    if "irreflexive" in characteristics:
+        descriptions.append("This property is irreflexive (an entity cannot have this relationship with itself).")
 
-    if is_inverse_functional:
-        descriptions.append(f"It is an inverse functional property, meaning each object can have at most one subject that {prop_name} it.")
+    # Check for inverse, equivalent, and disjoint properties separately
 
-    # Domain and range
+    # InverseOf
+    for s, p, o in g.triples((prop, OWL.inverseOf, None)):
+        inverse_prop_name = get_nice_label(g, o)
+        if inverse_prop_name:
+            descriptions.append(f"It is the inverse of the {inverse_prop_name} property.")
+
+    # EquivalentProperty
+    for s, p, o in g.triples((prop, OWL.equivalentProperty, None)):
+        equiv_prop_name = get_nice_label(g, o)
+        if equiv_prop_name:
+            descriptions.append(f"This property is equivalent to {equiv_prop_name}.")
+
+    # PropertyDisjointWith
+    disjoint_props = []
+    for s, p, o in g.triples((prop, OWL.propertyDisjointWith, None)):
+        disjoint_prop_name = get_nice_label(g, o)
+        if disjoint_prop_name:
+            disjoint_props.append(disjoint_prop_name)
+    if disjoint_props:
+        disjoint_list = " and ".join(disjoint_props)
+        descriptions.append(f"This property is disjoint with {disjoint_list}.")
+
+    # --- END MODIFICATION ---
+
+    # Domain and range information (no changes needed here)
     domains = property_domains.get(prop, set())
     ranges = property_ranges.get(prop, set())
 
-    domain_names = [get_nice_label(g, d) for d in domains if get_nice_label(g, d)]  # Skip blank nodes
-    domain_names = [name for name in domain_names if name is not None]  # Filter out None
-    range_names = [get_nice_label(g, r) for r in ranges if get_nice_label(g, r)]  # Skip blank nodes
-    range_names = [name for name in range_names if name is not None]  # Filter out None
+    domain_names = [get_nice_label(g, d) for d in domains if get_nice_label(g, d)]
+    range_names = [get_nice_label(g, r) for r in ranges if get_nice_label(g, r)]
 
-    if domain_names:
-        domain_names = [name for name in domain_names if isinstance(name, str)]  # Ensure only strings
-        descriptions.append(f"The domain of {prop_name} is {', '.join(domain_names)}, which means that only {' or '.join(domain_names)} can have this property.")
-
-    if range_names:
-        range_names = [name for name in range_names if isinstance(name, str)]  # Ensure only strings
-        descriptions.append(f"The range of {prop_name} is {', '.join(range_names)}, which means this property can only point to {' or '.join(range_names)}.")
-
-    # Check for inverse properties
-    inverse_props = []
-    for s, p, o in g.triples((prop, OWL.inverseOf, None)):
-        if isinstance(o, URIRef):  # Skip blank nodes
-            inverse_props.append(o)
-    for s, p, o in g.triples((None, OWL.inverseOf, prop)):
-        if isinstance(s, URIRef):  # Skip blank nodes
-            inverse_props.append(s)
-
-    if inverse_props:
-        inv_names = [get_nice_label(g, inv) for inv in inverse_props if get_nice_label(g, inv)]  # Skip blank nodes
-        if inv_names:
-            inv_names = [name for name in inv_names if isinstance(name, str)]  # Ensure only strings
-            if inv_names:
-                descriptions.append(f"The inverse of {prop_name} is {', '.join(inv_names)}.")
-
-    # Check for sub-properties
-    sub_props = []
-    for s, p, o in g.triples((None, RDFS.subPropertyOf, prop)):
-        if isinstance(s, URIRef):  # Skip blank nodes
-            sub_props.append(s)
-
-    if sub_props:
-        sub_names = [get_nice_label(g, sub) for sub in sub_props if get_nice_label(g, sub)]  # Skip blank nodes
-        if sub_names:
-            sub_names = [name for name in sub_names if isinstance(name, str)]  # Ensure only strings
-            if sub_names:
-                descriptions.append(f"The sub-properties of {prop_name} include {', '.join(sub_names)}.")
-
-    # Check for parent properties
-    parent_props = []
-    for s, p, o in g.triples((prop, RDFS.subPropertyOf, None)):
-        if isinstance(o, URIRef):  # Skip blank nodes
-            parent_props.append(o)
-
-    if parent_props:
-        parent_names = [get_nice_label(g, parent) for parent in parent_props if get_nice_label(g, parent)]  # Skip blank nodes
-        if parent_names:
-            parent_names = [name for name in parent_names if isinstance(name, str)]  # Ensure only strings
-            if parent_names:
-                descriptions.append(f"{prop_name} is a sub-property of {', '.join(parent_names)}.")
-
-    # Check for property chains
-    chains = []
-    for s, p, o in g.triples((prop, OWL.propertyChainAxiom, None)):
-        chain_list = o
-        chain_props = []
-        while chain_list != RDF.nil:
-            chain_prop = g.value(chain_list, RDF.first)
-            if chain_prop and isinstance(chain_prop, URIRef):  # Skip blank nodes
-                chain_prop_name = get_nice_label(g, chain_prop)
-                if chain_prop_name:
-                    chain_props.append(chain_prop_name)
-            chain_list = g.value(chain_list, RDF.rest)
-
-        if chain_props:
-            chain_description = " followed by ".join(chain_props)
-            chains.append(chain_description)
-
-    if chains:
-        descriptions.append(f"{prop_name} is defined as a chain of: {'; '.join(chains)}.")
+    if domain_names and range_names:
+        if len(domain_names) == 1 and len(range_names) == 1:
+            desc = f"This property connects {domain_names[0]} to {range_names[0]}."
+        else:
+            domain_text = " or ".join(domain_names)
+            range_text = " or ".join(range_names)
+            desc = f"This property connects {domain_text} to {range_text}."
+        descriptions.append(desc)
 
     return " ".join(descriptions)
 
-def describe_individual(g, ind, classes, obj_properties):
-    """Generate a detailed natural language description of an individual."""
+def get_property_hierarchy(g, obj_properties):
+    """Build a complete property hierarchy"""
+    subprop_relations = []
+    for s, p, o in g.triples((None, RDFS.subPropertyOf, None)):
+        if s in obj_properties and o in obj_properties:
+            subprop_relations.append((s, o))
+    return subprop_relations
+
+def detect_domain_type_structurally(g, individuals, classes, obj_properties):
+    """Detect domain type based purely on structural patterns, not semantics"""
+    # Count structural patterns rather than domain-specific terms
+    pattern_counts = {
+        'hierarchical': 0,  # lots of subclass relationships
+        'relational': 0,    # lots of object properties
+        'instance_heavy': 0, # lots of individuals
+        'simple': 0         # basic structure
+    }
+
+    # Count subclass relationships
+    subclass_count = 0
+    for s, p, o in g.triples((None, RDFS.subClassOf, None)):
+        subclass_count += 1
+
+    # Count object properties
+    obj_prop_count = len(obj_properties)
+
+    # Count individuals
+    individual_count = len(individuals)
+
+    # Determine structural complexity
+    if subclass_count > 10:
+        return 'hierarchical'
+    elif obj_prop_count > 20:
+        return 'relational'
+    elif individual_count > 50:
+        return 'instance_heavy'
+    else:
+        return 'general'
+
+def get_all_individuals(g, classes, obj_properties):
+    """Get all individuals including those not explicitly declared"""
+    individuals = set()
+
+    # Explicitly declared individuals
+    for s, p, o in g.triples((None, RDF.type, OWL.NamedIndividual)):
+        if isinstance(s, URIRef):
+            individuals.add(s)
+
+    # Find individuals that are subjects or objects of object properties
+    # but are not classes, properties, or other ontological constructs
+    excluded_types = {
+        OWL.Class, OWL.ObjectProperty, OWL.DatatypeProperty,
+        OWL.AnnotationProperty, OWL.Ontology, RDFS.Class
+    }
+
+    for prop in obj_properties:
+        # Get all subjects and objects of this property
+        for s, p, o in g.triples((None, prop, None)):
+            if isinstance(s, URIRef):
+                # Check if s is not a class/property
+                s_types = set(g.objects(s, RDF.type))
+                if not s_types.intersection(excluded_types):
+                    individuals.add(s)
+
+            if isinstance(o, URIRef):
+                # Check if o is not a class/property
+                o_types = set(g.objects(o, RDF.type))
+                if not o_types.intersection(excluded_types):
+                    individuals.add(o)
+
+    # Also check for any URI that appears as subject of any triple
+    # and has some class type (even if inferred)
+    for s, p, o in g.triples((None, RDF.type, None)):
+        if isinstance(s, URIRef) and o in classes:
+            individuals.add(s)
+
+    # Additional heuristic: any URIRef that's not a known class/property
+    # and appears in object position of relevant triples
+    all_uris = set()
+    for s, p, o in g:
+        if isinstance(s, URIRef):
+            all_uris.add(s)
+        if isinstance(o, URIRef):
+            all_uris.add(o)
+
+    # Filter out known ontological constructs
+    ontological_uris = classes.union(obj_properties).union({
+        RDF.type, RDFS.subClassOf, OWL.equivalentClass, RDFS.domain, RDFS.range
+    })
+
+    for uri in all_uris:
+        if uri not in ontological_uris:
+            # Check if it's used in meaningful relationships
+            has_relationships = False
+            for s, p, o in g.triples((uri, None, None)):
+                if p in obj_properties:
+                    has_relationships = True
+                    break
+            for s, p, o in g.triples((None, None, uri)):
+                if p in obj_properties:
+                    has_relationships = True
+                    break
+
+            if has_relationships:
+                individuals.add(uri)
+
+    return individuals
+
+def describe_individual_with_domain_independence(g, ind, classes, obj_properties, all_individuals=None):
+    """Generate natural language description of an individual without domain assumptions"""
     descriptions = []
     ind_name = get_nice_label(g, ind)
 
-    # Get the types of the individual
+    if not ind_name:
+        return ""
+
+    verbalizer = DomainIndependentVerbalizer()
+
+    # Get types/classes
     types = []
     for s, p, o in g.triples((ind, RDF.type, None)):
         if o != OWL.NamedIndividual and o in classes:
             types.append(o)
 
     if types:
-        type_names = [get_nice_label(g, t) for t in types if get_nice_label(g, t)]  # Skip blank nodes
-        type_names = [name for name in type_names if name is not None]  # Filter out None
+        type_names = [get_nice_label(g, t) for t in types if get_nice_label(g, t)]
+        type_names = [name for name in type_names if name and isinstance(name, str)]
         if type_names:
-            type_names = [name for name in type_names if isinstance(name, str)]  # Ensure only strings
-            if type_names:
-                descriptions.append(f"{ind_name} is a {', '.join(type_names)}.")
-        else:
-            descriptions.append(f"{ind_name} is an individual in this ontology.")
-    else:
-        descriptions.append(f"{ind_name} is an individual in this ontology.")
+            if len(type_names) == 1:
+                desc = create_simple_sentence(ind_name, "is", f"an instance of {type_names[0]}")
+            else:
+                type_text = " and ".join([f"an instance of {t}" for t in type_names])
+                desc = f"{ind_name} is {type_text}."
+            descriptions.append(desc)
 
-    # Get outgoing relationships
-    outgoing_relations = []
+    # Collect and organize relationships to avoid duplicates and improve readability
+    outgoing_relationships = {}
+    incoming_relationships = {}
+    property_characteristics = {}
+
+    # Get ALL outgoing relationships (including to non-declared individuals)
     for s, p, o in g.triples((ind, None, None)):
-        if p != RDF.type and isinstance(o, URIRef) and p in obj_properties:
-            outgoing_relations.append((p, o))
+        if p != RDF.type and p in obj_properties and isinstance(o, URIRef):
+            prop_name = get_nice_label(g, p)
+            obj_name = get_nice_label(g, o)
 
-    if outgoing_relations:
-        for prop, obj in outgoing_relations:
-            prop_name = get_nice_label(g, prop)
-            obj_name = get_nice_label(g, obj)
-            if prop_name and obj_name:  # Skip blank nodes
-                descriptions.append(f"{ind_name} {prop_name} {obj_name}.")
+            # If obj_name is None, try to extract from URI
+            if not obj_name:
+                obj_name = clean_entity_name(str(o).split('#')[-1].split('/')[-1])
 
-    # Get incoming relationships
-    incoming_relations = []
+            if prop_name and obj_name:
+                if prop_name not in outgoing_relationships:
+                    outgoing_relationships[prop_name] = []
+                outgoing_relationships[prop_name].append(obj_name)
+
+                # Collect property characteristics
+                if p not in property_characteristics:
+                    property_characteristics[p] = []
+                    for _, prop_type, _ in g.triples((p, RDF.type, None)):
+                        if prop_type == OWL.SymmetricProperty:
+                            property_characteristics[p].append('symmetric')
+                        elif prop_type == OWL.TransitiveProperty:
+                            property_characteristics[p].append('transitive')
+                        elif prop_type == OWL.FunctionalProperty:
+                            property_characteristics[p].append('functional')
+
+    # Get ALL incoming relationships
     for s, p, o in g.triples((None, None, ind)):
         if isinstance(s, URIRef) and s != ind and p in obj_properties:
-            incoming_relations.append((s, p))
+            subj_name = get_nice_label(g, s)
 
-    if incoming_relations:
-        for subj, prop in incoming_relations:
-            subj_name = get_nice_label(g, subj)
-            prop_name = get_nice_label(g, prop)
-            if subj_name and prop_name:  # Skip blank nodes
-                descriptions.append(f"{subj_name} {prop_name} {ind_name}.")
+            # If subj_name is None, try to extract from URI
+            if not subj_name:
+                subj_name = clean_entity_name(str(s).split('#')[-1].split('/')[-1])
 
-    # Get annotation properties
-    annotations = []
-    for s, p, o in g.triples((ind, None, None)):
-        if isinstance(o, Literal):
-            annotations.append((p, o))
+            prop_name = get_nice_label(g, p)
+            if subj_name and prop_name:
+                prop_key = f"incoming_{prop_name}"
+                if prop_key not in incoming_relationships:
+                    incoming_relationships[prop_key] = []
+                incoming_relationships[prop_key].append(subj_name)
 
-    if annotations:
-        for prop, value in annotations:
-            prop_name = get_nice_label(g, prop)
-            if prop_name:  # Skip blank nodes
-                descriptions.append(f"{ind_name} has {prop_name} {value}.")
+    # Generate sentences for outgoing relationships
+    for prop_name, related_entities in outgoing_relationships.items():
+        # Find the property URI for this prop_name
+        prop_uri = None
+        for s, p, o in g.triples((ind, None, None)):
+            if get_nice_label(g, p) == prop_name:
+                prop_uri = p
+                break
 
+        if prop_uri:
+            chars = property_characteristics.get(prop_uri, [])
+            pattern = verbalizer.detect_linguistic_pattern(str(prop_uri), chars)
+
+            # Group multiple objects for the same property
+            if len(related_entities) == 1:
+                desc = verbalizer.structural_patterns[pattern](ind_name, str(prop_uri), related_entities[0])
+                descriptions.append(desc + ".")
+            else:
+                # Create a single sentence with multiple objects
+                objects_text = ", ".join(related_entities[:-1]) + f" and {related_entities[-1]}"
+                desc = verbalizer.structural_patterns[pattern](ind_name, str(prop_uri), objects_text)
+                descriptions.append(desc + ".")
+
+    # Generate sentences for incoming relationships (more selective)
+    for prop_key, related_entities in incoming_relationships.items():
+        prop_name = prop_key.replace("incoming_", "")
+
+        # Find the property URI
+        prop_uri = None
+        for s, p, o in g.triples((None, None, ind)):
+            if get_nice_label(g, p) == prop_name:
+                prop_uri = p
+                break
+
+        if prop_uri:
+            chars = property_characteristics.get(prop_uri, [])
+
+            # Only include incoming relationships if they're not already covered by outgoing
+            # and if they add meaningful information
+            if prop_name not in outgoing_relationships:
+                if len(related_entities) == 1:
+                    pattern = verbalizer.detect_linguistic_pattern(str(prop_uri), chars)
+                    desc = verbalizer.structural_patterns[pattern](related_entities[0], str(prop_uri), ind_name)
+                    descriptions.append(desc + ".")
+                elif len(related_entities) <= 5:  # Show more incoming relationships
+                    subject = ", ".join(related_entities[:-1]) + f" and {related_entities[-1]}"
+                    desc = f"{subject} are related to {ind_name} through {prop_name}"
+                    descriptions.append(desc + ".")
+
+    if not descriptions:
+        desc = create_simple_sentence(ind_name, "is", "an individual in this ontology")
+        descriptions.append(desc)
+
+    # Join descriptions with proper spacing
     return " ".join(descriptions)
 
-def verbalize_ontology(ttl_file_path, output_dir):
-    """Verbalize a single ontology file and save as JSON."""
-    print(f"Processing: {ttl_file_path}")
-    
-    # Load the ontology with RDFLib
+def verbalize_ontology(ontology_file_path, output_dir):
+    """Verbalize a single ontology file and save as JSON - domain independent"""
+    print(f"Processing: {ontology_file_path}")
+
     g = Graph()
     try:
-        g.parse(ttl_file_path, format="turtle")
+        g.parse(ontology_file_path)
         print(f"Successfully loaded ontology with {len(g)} triples")
     except Exception as e:
         print(f"Error loading ontology: {e}")
         return None
 
-    # Extract ontology structure
-    classes = set()
-    for s, p, o in g.triples((None, RDF.type, OWL.Class)):
-        if isinstance(s, URIRef):
-            classes.add(s)
+    try:
+        # Extract ontology structure
+        classes = set()
+        for s, p, o in g.triples((None, RDF.type, OWL.Class)):
+            if isinstance(s, URIRef):
+                classes.add(s)
 
-    obj_properties = set()
-    for s, p, o in g.triples((None, RDF.type, OWL.ObjectProperty)):
-        if isinstance(s, URIRef):
-            obj_properties.add(s)
+        obj_properties = set()
+        for s, p, o in g.triples((None, RDF.type, OWL.ObjectProperty)):
+            if isinstance(s, URIRef):
+                obj_properties.add(s)
 
-    data_properties = set()
-    for s, p, o in g.triples((None, RDF.type, OWL.DatatypeProperty)):
-        if isinstance(s, URIRef):
-            data_properties.add(s)
+        data_properties = set()
+        for s, p, o in g.triples((None, RDF.type, OWL.DatatypeProperty)):
+            if isinstance(s, URIRef):
+                data_properties.add(s)
 
-    # Only include true individuals (rdf:type owl:NamedIndividual)
-    individuals = set()
-    for s, p, o in g.triples((None, RDF.type, OWL.NamedIndividual)):
-        if isinstance(s, URIRef):
-            individuals.add(s)
+        # Enhanced individual detection
+        individuals = get_all_individuals(g, classes, obj_properties)
 
-    # Optional fallback for legacy ontologies (if no individuals found)
-    if not individuals:
-        for s, p, o in g.triples((None, RDF.type, None)):
-            if (
-                o != OWL.Class and
-                o != OWL.ObjectProperty and
-                o != OWL.DatatypeProperty and
-                o != OWL.AnnotationProperty and
-                o != OWL.Ontology and
-                isinstance(s, URIRef) and
-                not str(s).endswith('.owl')
-            ):
-                individuals.add(s)
+        print(f"Found {len(individuals)} individuals (including implicit ones)")
 
-    subclass_relations = []
-    for s, p, o in g.triples((None, RDFS.subClassOf, None)):
-        if s in classes and o in classes:
-            subclass_relations.append((s, o))
+        # Detect domain type structurally
+        domain_type = detect_domain_type_structurally(g, individuals, classes, obj_properties)
+        print(f"Detected structural type: {domain_type}")
 
-    equivalent_class_relations = []
-    for s, p, o in g.triples((None, OWL.equivalentClass, None)):
-        if s in classes:
-            equivalent_class_relations.append((s, o))
+        # Get relationships
+        subclass_relations = []
+        for s, p, o in g.triples((None, RDFS.subClassOf, None)):
+            if s in classes and o in classes:
+                subclass_relations.append((s, o))
 
-    # Get domain and range for properties
-    property_domains = {}
-    property_ranges = {}
+        equivalent_class_relations = []
+        for s, p, o in g.triples((None, OWL.equivalentClass, None)):
+            if s in classes:
+                equivalent_class_relations.append((s, o))
 
-    for prop in obj_properties:
-        domains = set()
-        for s, p, o in g.triples((prop, RDFS.domain, None)):
-            domains.add(o)
-        property_domains[prop] = domains
+        # Get domain and range for properties
+        property_domains = {}
+        property_ranges = {}
 
-        ranges = set()
-        for s, p, o in g.triples((prop, RDFS.range, None)):
-            ranges.add(o)
-        property_ranges[prop] = ranges
+        for prop in obj_properties:
+            domains = set()
+            for s, p, o in g.triples((prop, RDFS.domain, None)):
+                domains.add(o)
+            property_domains[prop] = domains
 
-    # Create verbalization data
-    verbalization_data = {
-        "ontology": {
-            "name": os.path.basename(ttl_file_path).split('.')[0],
-            "triples": len(g)
-        },
-        "classes": [],
-        "objectProperties": [],
-        "dataProperties": [],
-        "individuals": []
-    }
+            ranges = set()
+            for s, p, o in g.triples((prop, RDFS.range, None)):
+                ranges.add(o)
+            property_ranges[prop] = ranges
 
-    # Add classes to JSON
-    for cls in sorted(classes, key=lambda x: get_nice_label(g, x) or ""):
-        cls_name = get_nice_label(g, cls)
-        if cls_name:  # Skip blank nodes
-            cls_data = {
-                "uri": str(cls),
-                "classLabel": cls_name,
-                "description": describe_class(g, cls, classes, subclass_relations, equivalent_class_relations, obj_properties, property_domains, property_ranges)
-            }
-            verbalization_data["classes"].append(cls_data)
+        # Create verbalization data
+        ontology_description = create_simple_sentence(
+            f"This {domain_type} ontology",
+            "contains information about",
+            f"{len(individuals)} individuals, {len(classes)} classes, and {len(obj_properties)} properties"
+        )
 
-    # Add object properties to JSON
-    for prop in sorted(obj_properties, key=lambda x: get_nice_label(g, x) or ""):
-        prop_name = get_nice_label(g, prop)
-        if prop_name:  # Skip blank nodes
-            prop_data = {
-                "uri": str(prop),
-                "propertyLabel": prop_name,
-                "description": describe_property(g, prop, obj_properties, property_domains, property_ranges)
-            }
-            verbalization_data["objectProperties"].append(prop_data)
+        verbalization_data = {
+            "ontology": {
+                "name": Path(ontology_file_path).stem,
+                "structuralType": domain_type,
+                "triples": len(g),
+                "description": ontology_description
+            },
+            "classes": [],
+            "objectProperties": [],
+            "dataProperties": [],
+            "individuals": []
+        }
 
-    # Add data properties to JSON
-    for prop in sorted(data_properties, key=lambda x: get_nice_label(g, x) or ""):
-        prop_name = get_nice_label(g, prop)
-        if prop_name:  # Skip blank nodes
-            prop_data = {
-                "uri": str(prop),
-                "propertyLabel": prop_name,
-                "description": f"{prop_name} is a data property in this ontology."
-            }
-            verbalization_data["dataProperties"].append(prop_data)
+        # Add classes without URIs
+        print("Generating class descriptions...")
+        for cls in sorted(classes, key=lambda x: get_nice_label(g, x) or ""):
+            cls_name = get_nice_label(g, cls)
+            if cls_name:
+                cls_data = {
+                    "classLabel": cls_name,
+                    "description": describe_class_with_domain_independence(g, cls, classes, subclass_relations, equivalent_class_relations, obj_properties, property_domains, property_ranges)
+                }
+                verbalization_data["classes"].append(cls_data)
 
-    # Add individuals to JSON
-    for ind in sorted(individuals, key=lambda x: get_nice_label(g, x) or ""):
-        ind_name = get_nice_label(g, ind)
-        if ind_name:  # Skip blank nodes
-            ind_data = {
-                "uri": str(ind),
-                "individualLabel": ind_name,
-                "description": describe_individual(g, ind, classes, obj_properties)
-            }
-            verbalization_data["individuals"].append(ind_data)
+        # Add object properties without URIs
+        print("Generating property descriptions...")
+        for prop in sorted(obj_properties, key=lambda x: get_nice_label(g, x) or ""):
+            prop_name = get_nice_label(g, prop)
+            if prop_name:
+                prop_data = {
+                    "propertyLabel": prop_name,
+                    "description": describe_property_with_domain_independence(g, prop, obj_properties, property_domains, property_ranges)
+                }
+                verbalization_data["objectProperties"].append(prop_data)
 
-    # Save JSON file
-    output_file = output_dir / f"{os.path.basename(ttl_file_path).split('.')[0]}.json"
-    with open(output_file, "w") as json_file:
-        json.dump(verbalization_data, json_file, indent=2)
-    
-    print(f"Saved verbalization to: {output_file}")
-    return output_file
+        # Add data properties
+        for prop in sorted(data_properties, key=lambda x: get_nice_label(g, x) or ""):
+            prop_name = get_nice_label(g, prop)
+            if prop_name:
+                prop_data = {
+                    "propertyLabel": prop_name,
+                    "description": create_simple_sentence(prop_name, "is", "a data property in this ontology")
+                }
+                verbalization_data["dataProperties"].append(prop_data)
+
+        # Add individuals without URIs - using enhanced description
+        print("Generating individual descriptions...")
+        for ind in sorted(individuals, key=lambda x: get_nice_label(g, x) or ""):
+            ind_name = get_nice_label(g, ind)
+            if ind_name:
+                ind_data = {
+                    "individualLabel": ind_name,
+                    "description": describe_individual_with_domain_independence(g, ind, classes, obj_properties, individuals)
+                }
+                verbalization_data["individuals"].append(ind_data)
+
+        # Save JSON file
+        output_file = output_dir / f"{Path(ontology_file_path).stem}.json"
+        with open(output_file, "w", encoding='utf-8') as json_file:
+            json.dump(verbalization_data, json_file, indent=2, ensure_ascii=False)
+
+        print(f"Saved verbalization to: {output_file}")
+        print(f"Generated descriptions for:")
+        print(f"  - {len(verbalization_data['classes'])} classes")
+        print(f"  - {len(verbalization_data['objectProperties'])} object properties")
+        print(f"  - {len(verbalization_data['dataProperties'])} data properties")
+        print(f"  - {len(verbalization_data['individuals'])} individuals")
+
+        return output_file
+
+    except Exception as e:
+        print(f"Error during verbalization: {e}")
+        import traceback
+        print(f"Full traceback: {traceback.format_exc()}")
+        return None
+
+    finally:
+        # Explicit cleanup
+        if 'g' in locals():
+            g.close()
+            del g
+        # Clear large local variables
+        if 'verbalization_data' in locals():
+            del verbalization_data
+        if 'classes' in locals():
+            del classes
+        if 'obj_properties' in locals():
+            del obj_properties
+        if 'data_properties' in locals():
+            del data_properties
+        if 'individuals' in locals():
+            del individuals
+        gc.collect()
+
+def process_in_batches(ontology_files, output_dir, batch_size=50, memory_threshold=80):
+    """Process ontologies in batches with memory management"""
+    successful = 0
+    failed = 0
+    total_batches = (len(ontology_files) + batch_size - 1) // batch_size
+
+    for i in range(0, len(ontology_files), batch_size):
+        batch = ontology_files[i:i + batch_size]
+        current_batch = i // batch_size + 1
+
+        print(f"\n{'='*60}")
+        print(f"Processing batch {current_batch}/{total_batches}")
+        print(f"Files {i+1} to {min(i+batch_size, len(ontology_files))} of {len(ontology_files)}")
+        print(f"Current memory usage: {psutil.virtual_memory().percent:.1f}%")
+
+        # Process current batch
+        batch_successful = 0
+        batch_failed = 0
+
+        for j, ontology_file in enumerate(batch, 1):
+            try:
+                print(f"  [{current_batch}.{j}] Processing: {ontology_file.name}")
+                result = verbalize_ontology(ontology_file, output_dir)
+                if result:
+                    successful += 1
+                    batch_successful += 1
+                    print(f"  âœ… Successfully processed: {ontology_file.name}")
+                else:
+                    failed += 1
+                    batch_failed += 1
+                    print(f"  âŒ Failed to process: {ontology_file.name}")
+            except Exception as e:
+                failed += 1
+                batch_failed += 1
+                print(f"  âŒ Error processing {ontology_file.name}: {e}")
+                import traceback
+                print(f"  Full error: {traceback.format_exc()}")
+
+        # Force garbage collection after each batch
+        gc.collect()
+
+        # Check memory usage and pause if needed
+        memory_percent = psutil.virtual_memory().percent
+        if memory_percent > memory_threshold:
+            print(f"âš ï¸ Memory usage at {memory_percent:.1f}%, pausing for 5 seconds...")
+            time.sleep(5)
+            gc.collect()
+
+            # If still high memory, try more aggressive cleanup
+            new_memory = psutil.virtual_memory().percent
+            if new_memory > memory_threshold:
+                print(f"âš ï¸ Memory still high at {new_memory:.1f}%, performing aggressive cleanup...")
+                # Reinitialize SimpleNLG if available
+                if SIMPLENLG_AVAILABLE:
+                    try:
+                        global lexicon, nlg_factory, realiser
+                        del lexicon, nlg_factory, realiser
+                        lexicon = Lexicon.getDefaultLexicon()
+                        nlg_factory = NLGFactory(lexicon)
+                        realiser = Realiser(lexicon)
+                        gc.collect()
+                        print("ðŸ”„ SimpleNLG reinitialized")
+                    except:
+                        pass
+                time.sleep(5)
+                gc.collect()
+
+        print(f"Batch {current_batch}/{total_batches} completed:")
+        print(f"  âœ… Successful in batch: {batch_successful}")
+        print(f"  âŒ Failed in batch: {batch_failed}")
+        print(f"  ðŸ“Š Total progress: {successful + failed}/{len(ontology_files)} files ({((successful + failed)/len(ontology_files)*100):.1f}%)")
+        print(f"  ðŸ”§ Memory usage: {psutil.virtual_memory().percent:.1f}%")
+
+        # Small pause between batches to let system breathe
+        if current_batch < total_batches:  # Don't pause after the last batch
+            time.sleep(2)
+
+    return successful, failed
 
 def main():
-    """Main function to process all ontologies in family_1hop_tbox."""
-    # Create output directories
-    output_dir = Path("verbalized_ontologies/family_2hop")
+    """Main function to process ontology files - works with any domain"""
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Verbalize ontology files to natural language JSON (domain-independent)')
+    parser.add_argument('--input-dir',
+                        default='src/main/resources/OWL2Bench_2hop',
+                        help='Input directory containing ontology files')
+    parser.add_argument('--output-dir',
+                        default='output/verbalized_ontologies/OWL2Bench_2hop',
+                        help='Output directory for JSON files')
+    parser.add_argument('--file-pattern',
+                        default='*.ttl',
+                        help='File pattern to match (e.g., *.ttl, *.owl, *.rdf)')
+    parser.add_argument('--batch-size',
+                        type=int,
+                        default=50,
+                        help='Number of files to process in each batch')
+    parser.add_argument('--memory-threshold',
+                        type=int,
+                        default=80,
+                        help='Memory usage threshold (%) to trigger cleanup pause')
+
+    args = parser.parse_args()
+
+    # Create output directory
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Find all TTL files in family_1hop_tbox
-    ttl_files = glob.glob("../src/main/resources/ontologies/family_2hop_tbox/*.ttl")
-    
-    if not ttl_files:
-        print("No TTL files found in ../src/main/resources/ontologies/family_2hop_tbox/")
+    # Define input directory
+    input_dir = Path(args.input_dir)
+
+    # Check if input directory exists
+    if not input_dir.exists():
+        print(f"Error: Input directory does not exist: {input_dir}")
         return
 
-    print(f"Found {len(ttl_files)} TTL files to process")
-    
-    processed_count = 0
-    for ttl_file in ttl_files:
-        try:
-            result = verbalize_ontology(ttl_file, output_dir)
-            if result:
-                processed_count += 1
-            # (Removed: triple-based verbalization call)
-        except Exception as e:
-            print(f"Error processing {ttl_file}: {e}")
-    
-    print(f"\nProcessed {processed_count} out of {len(ttl_files)} files successfully!")
-    print(f"Results saved in: {output_dir.absolute()}")
+    # Find all matching files
+    ontology_files = list(input_dir.glob(args.file_pattern))
+
+    if not ontology_files:
+        print(f"No files matching '{args.file_pattern}' found in {input_dir}")
+        return
+
+    print(f"Found {len(ontology_files)} ontology files to process:")
+    for file in ontology_files[:10]:  # Show first 10 files
+        print(f"  - {file.name}")
+    if len(ontology_files) > 10:
+        print(f"  ... and {len(ontology_files) - 10} more files")
+
+    if SIMPLENLG_AVAILABLE:
+        print("ðŸŽ¯ Using SimpleNLG for enhanced natural language generation")
+    else:
+        print("âš ï¸ SimpleNLG not available, using basic text generation")
+
+    print("ðŸ”§ Using domain-independent structural pattern recognition")
+    print(f"ðŸ”§ Processing in batches of {args.batch_size} files")
+    print(f"ðŸ”§ Memory threshold: {args.memory_threshold}%")
+    print(f"ðŸ”§ Current memory usage: {psutil.virtual_memory().percent:.1f}%")
+
+    # Process in batches instead of all at once
+    successful, failed = process_in_batches(
+        ontology_files,
+        output_dir,
+        batch_size=args.batch_size,
+        memory_threshold=args.memory_threshold
+    )
+
+    print(f"\n{'='*60}")
+    print(f"Processing completed!")
+    print(f"âœ… Successful: {successful}")
+    print(f"âŒ Failed: {failed}")
+    print(f"ðŸ“ Output directory: {output_dir.absolute()}")
+    print(f"ðŸ”§ Final memory usage: {psutil.virtual_memory().percent:.1f}%")
 
 if __name__ == "__main__":
-    main() 
+    main()

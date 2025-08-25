@@ -1,13 +1,17 @@
 package com.example.query;
 
-import com.example.output.OutputService;
-
+/**
+ * Interface for generating SPARQL queries
+ */
 public interface QueryGenerationService {
-    void initialize(org.semanticweb.owlapi.model.OWLOntology ontology,
-                    openllet.owlapi.OpenlletReasoner reasoner,
-                    com.example.explanation.ExplanationService explanationService,
-                    org.semanticweb.owlapi.model.OWLDataFactory dataFactory);
-    void generatePropertyAssertionQueries(OutputService outputService);
-    void generateMembershipQueries(OutputService outputService);
-    void generateSubsumptionQueries(OutputService outputService);
+
+    /**
+     * Generate an ASK query
+     */
+    String generateQuery(String subject, String predicate, String object);
+
+    /**
+     * Generate a SELECT query
+     */
+    String generateSelectQuery(String subject, String predicate, String object);
 }
