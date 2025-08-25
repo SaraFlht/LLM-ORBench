@@ -1,0 +1,265 @@
+# Core Data Science and Analysis
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# OpenAI and LLM APIs
+openai>=1.12.0
+anthropic>=0.18.0
+
+# Environment and Configuration
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+
+# Progress Bars and Logging
+tqdm>=4.65.0
+rich>=13.0.0
+
+# JSON and Data Handling
+jsonlines>=3.1.0
+jsonschema>=4.17.0
+
+# HTTP Requests and API Calls
+requests>=2.31.0
+httpx>=0.24.0
+aiohttp>=3.8.0
+
+# Concurrent Processing
+concurrent-futures>=3.1.1
+
+# Date and Time Handling
+python-dateutil>=2.8.0
+
+# File and Path Handling
+pathlib2>=2.3.7
+
+# DeepEval for LLM Evaluation (Optional but recommended)
+deepeval>=0.21.0
+
+# Additional ML/AI Evaluation Tools
+datasets>=2.12.0
+transformers>=4.30.0
+torch>=2.0.0
+sentence-transformers>=2.2.0
+
+# Statistical Analysis
+scikit-learn>=1.3.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Web Scraping and HTML Processing (if needed for ontology processing)
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# XML Processing (for OWL files)
+lxml>=4.9.0
+xml2dict>=0.2.2
+
+# RDF and Ontology Processing (if you need to process OWL/RDF files directly)
+rdflib>=6.3.0
+owlrl>=6.0.2
+
+# Text Processing and NLP
+nltk>=3.8.0
+spacy>=3.6.0
+textblob>=0.17.0
+
+# Cryptography (for secure API calls)
+cryptography>=41.0.0
+
+# Database Support (if you need to store results)
+sqlalchemy>=2.0.0
+sqlite3  # Built into Python
+
+# Excel File Support
+openpyxl>=3.1.0
+xlsxwriter>=3.1.0
+
+# YAML Configuration (if you add YAML config files)
+PyYAML>=6.0
+
+# Type Checking and Code Quality
+mypy>=1.4.0
+black>=23.0.0
+flake8>=6.0.0
+isort>=5.12.0
+
+# Testing Framework
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-mock>=3.11.0
+
+# Memory Management and Performance
+psutil>=5.9.0
+memory-profiler>=0.61.0
+
+# Jupyter Notebook Support (for analysis)
+jupyter>=1.0.0
+ipykernel>=6.23.0
+notebook>=6.5.0
+
+# Plotting and Visualization
+plotly>=5.15.0
+bokeh>=3.2.0
+
+# Web Framework (if you build a web interface)
+fastapi>=0.100.0
+uvicorn>=0.22.0
+streamlit>=1.24.0
+
+# Configuration Management
+configparser>=5.3.0
+toml>=0.10.2
+
+# Async Support
+asyncio  # Built into Python 3.7+
+aiofiles>=23.1.0
+
+# Error Tracking and Monitoring
+sentry-sdk>=1.28.0
+
+# Command Line Interface
+click>=8.1.0
+argparse  # Built into Python
+
+# Caching
+diskcache>=5.6.0
+redis>=4.6.0
+
+# Compression
+gzip  # Built into Python
+zipfile  # Built into Python
+
+# Security
+certifi>=2023.5.7
+urllib3>=2.0.0
+
+# Regex and String Processing
+regex>=2023.6.3
+
+# System Information
+platform  # Built into Python
+sys  # Built into Python
+os  # Built into Python
+
+# Mathematical Operations
+math  # Built into Python
+random  # Built into Python
+statistics  # Built into Python
+
+# Concurrency and Threading
+threading  # Built into Python
+multiprocessing  # Built into Python
+queue  # Built into Python
+
+# File Operations
+shutil  # Built into Python
+glob  # Built into Python
+tempfile  # Built into Python
+
+# Networking
+socket  # Built into Python
+ssl  # Built into Python
+
+# Serialization
+pickle  # Built into Python
+marshal  # Built into Python
+
+# Collections and Data Structures
+collections  # Built into Python
+itertools  # Built into Python
+functools  # Built into Python
+
+# Time and Calendar
+time  # Built into Python
+datetime  # Built into Python
+calendar  # Built into Python
+
+# Hash Functions
+hashlib  # Built into Python
+hmac  # Built into Python
+
+# Base64 Encoding
+base64  # Built into Python
+
+# Copy Operations
+copy  # Built into Python
+
+# Warnings Management
+warnings  # Built into Python
+
+# Garbage Collection
+gc  # Built into Python
+
+# Weak References
+weakref  # Built into Python
+
+# Context Management
+contextlib  # Built into Python
+
+# Abstract Base Classes
+abc  # Built into Python
+
+# Enum Support
+enum  # Built into Python
+
+# Decimal Precision
+decimal  # Built into Python
+
+# Fractions
+fractions  # Built into Python
+
+# UUID Generation
+uuid  # Built into Python
+
+# HTML Escaping
+html  # Built into Python
+
+# URL Processing
+urllib  # Built into Python
+
+# CSV Processing
+csv  # Built into Python
+
+# Configuration File Processing
+configparser  # Built into Python
+
+# Email Processing (if needed)
+email  # Built into Python
+
+# MIME Types
+mimetypes  # Built into Python
+
+# Subprocess Management
+subprocess  # Built into Python
+
+# Signal Handling
+signal  # Built into Python
+
+# Locale Support
+locale  # Built into Python
+
+# Logging Framework
+logging  # Built into Python
+
+# Unit Testing
+unittest  # Built into Python
+
+# Documentation Testing
+doctest  # Built into Python
+
+# Profiling
+cProfile  # Built into Python
+profile  # Built into Python
+
+# Trace Module
+trace  # Built into Python
+
+# Debugger
+pdb  # Built into Python
+
+# Python AST
+ast  # Built into Python
+
+# Code Compilation
+compile  # Built into Python function

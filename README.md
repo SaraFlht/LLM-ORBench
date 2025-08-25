@@ -59,3 +59,35 @@ java -jar target/owl-inference-explainer.jar
 3. The output files will be generated in the current directory:
 - `SPARQL_questions.csv`
 - `explanations.json`
+
+
+## Ontology Augmentation Scripts: Noise & Negation
+
+This project includes Python scripts for augmenting ontologies with noise and negation, located in the `scripts/` directory. These scripts allow you to generate modified ontologies for robustness testing or data augmentation.
+
+### Add Random Noise
+
+Adds a specified percentage of random triples (noise) to your ontology.
+
+**Usage:**
+```sh
+python scripts/add_noise.py --input path/to/input.ttl --output path/to/noise_output.ttl --noise_percentage 0.5
+```
+- `--input`: Path to the input ontology (Turtle format)
+- `--output`: Path to save the noisy ontology
+- `--noise_percentage`: Fraction of triples to add as noise (e.g., 0.25, 0.5, 0.75, 1.0)
+
+### Add Negation & Contradiction
+
+Adds negative predicates (e.g., `isNotFatherOf`) and optional contradictions to your ontology.
+
+**Usage:**
+```sh
+python scripts/add_negation.py --input path/to/input.ttl --output path/to/negation_output.ttl --negation_percentage 0.25 --contradiction_percentage 0.1
+```
+- `--input`: Path to the input ontology (Turtle format)
+- `--output`: Path to save the negation-augmented ontology
+- `--negation_percentage`: Fraction of object property triples to add negation for (0-1)
+- `--contradiction_percentage`: Fraction of negations that are contradictions (0-1, optional)
+
+The output ontologies will be saved in the specified output paths. You can use these augmented ontologies as input to the main Java application for further analysis or testing.
